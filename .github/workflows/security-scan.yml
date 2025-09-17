@@ -1,0 +1,93 @@
+name: Security Scanning
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 2 * * 1'  # Weekly security scan
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+        
+    - name: Install security tools
+      run: |
+        pip install bandit safety semgrep
+        pip install trivy
+        
+    - name: Run Bandit security scan
+      run: |
+        bandit -r main/ -f json -o bandit-report.json
+        
+    - name: Run Safety dependency scan
+      run: |
+        safety check --json --output safety-report.json
+        
+    - name: Run Semgrep security scan
+      run: |
+        semgrep --config=auto --json --output=semgrep-report.json main/
+        
+    - name: Build Docker image for container scan
+      run: |
+        docker build -t mycandidate:security-test .
+        
+    - name: Run Trivy container scan
+      run: |
+        trivy image mycandidate:security-test --format json --output trivy-report.json
+        
+    - name: Upload security reports
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-reports-${{ github.run_number }}
+        path: |
+          bandit-report.json
+          safety-report.json
+          semgrep-report.json
+          trivy-report.json
+        
+    - name: Comment PR with security results
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          
+          // Read security reports
+          const banditReport = JSON.parse(fs.readFileSync('bandit-report.json', 'utf8'));
+          const safetyReport = JSON.parse(fs.readFileSync('safety-report.json', 'utf8'));
+          
+          // Generate security summary
+          const banditIssues = banditReport.results.length;
+          const safetyIssues = safetyReport.length;
+          
+          const comment = `## Security Scan Results
+          
+          ### Static Analysis (Bandit)
+          - **Issues Found**: ${banditIssues}
+          - **High Severity**: ${banditReport.results.filter(r => r.issue_severity === 'HIGH').length}
+          - **Medium Severity**: ${banditReport.results.filter(r => r.issue_severity === 'MEDIUM').length}
+          - **Low Severity**: ${banditReport.results.filter(r => r.issue_severity === 'LOW').length}
+          
+          ### Dependency Scan (Safety)
+          - **Vulnerabilities Found**: ${safetyIssues}
+          
+          ${banditIssues > 0 || safetyIssues > 0 ? '⚠️ **Security issues detected. Please review the detailed reports.**' : '✅ **No security issues detected.**'}
+          `;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: comment
+          });
